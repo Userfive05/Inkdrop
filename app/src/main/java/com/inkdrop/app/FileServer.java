@@ -32,6 +32,9 @@ import java.util.concurrent.Executors;
  *   POST /api/upload?dir=D&name=X      raw request body is the file
  *   GET  /dl?dir=D&name=X              download a file
  *   POST /api/delete?dir=D&name=X      delete a file
+ *   POST /api/rename?dir=D&name=X&to=Y rename a file
+ *   POST /api/move?dir=D&name=X&dest=E move a file into folder E
+ *   POST /api/mkdir?dir=D&name=N       create folder N inside D
  */
 public class FileServer {
 
@@ -136,6 +139,12 @@ public class FileServer {
                 download(out, query.get("dir"), query.get("name"));
             } else if (method.equals("POST") && path.equals("/api/delete")) {
                 delete(out, query.get("dir"), query.get("name"));
+            } else if (method.equals("POST") && path.equals("/api/rename")) {
+                rename(out, query.get("dir"), query.get("name"), query.get("to"));
+            } else if (method.equals("POST") && path.equals("/api/move")) {
+                move(out, query.get("dir"), query.get("name"), query.get("dest"));
+            } else if (method.equals("POST") && path.equals("/api/mkdir")) {
+                mkdir(out, query.get("dir"), query.get("name"));
             } else if (method.equals("GET") && path.equals("/favicon.ico")) {
                 send(out, 204, "text/plain", "");
             } else {
@@ -210,6 +219,48 @@ public class FileServer {
             send(out, 500, "text/plain", "Could not delete");
         }
     }
+
+    private void rename(OutputStream out, String dir, String name, String to) throws IOException {
+        File f = resolve(dir, name);
+        if (f == null || !f.isFile()) { send(out, 404, "text/plain", "File not found"); return; }
+        if (to == null || to.trim().isEmpty()) { send(out, 400, "text/plain", "Enter a new name"); return; }
+        File target = resolve(dir, to);
+        if (target == null) { send(out, 400, "text/plain", "Invalid name"); return; }
+        if (target.getName().equals(f.getName())) { send(out, 200, "application/json", okName(f.getName())); return; }
+        // Allow changing only the capitalisation on case-insensitive storage
+        boolean caseOnly = target.getName().equalsIgnoreCase(f.getName());
+        if (target.exists() && !caseOnly) { send(out, 409, "text/plain", "A file named \"" + target.getName() + "\" already exists"); return; }
+        if (!f.renameTo(target)) { send(out, 500, "text/plain", "Could not rename"); return; }
+        log("Renamed " + f.getName() + " → " + target.getName());
+        send(out, 200, "application/json; charset=utf-8", okName(target.getName()));
+    }
+
+    private void move(OutputStream out, String dir, String name, String dest) throws IOException {
+        File f = resolve(dir, name);
+        if (f == null || !f.isFile()) { send(out, 404, "text/plain", "File not found"); return; }
+        File destDir = resolveDir(dest);
+        if (destDir == null || !destDir.isDirectory()) { send(out, 404, "text/plain", "Folder not found"); return; }
+        File target = new File(destDir, f.getName());
+        if (target.getCanonicalFile().equals(f.getCanonicalFile())) { send(out, 200, "application/json", okName(f.getName())); return; }
+        if (target.exists()) { send(out, 409, "text/plain", "That folder already has a file named \"" + f.getName() + "\""); return; }
+        if (!f.renameTo(target)) { send(out, 500, "text/plain", "Could not move"); return; }
+        log("Moved " + f.getName() + " → /" + (dest == null ? "" : dest));
+        send(out, 200, "application/json; charset=utf-8", okName(target.getName()));
+    }
+
+    private void mkdir(OutputStream out, String dir, String name) throws IOException {
+        File parent = resolveDir(dir);
+        if (parent == null || !parent.isDirectory()) { send(out, 404, "text/plain", "Folder not found"); return; }
+        if (name == null || name.trim().isEmpty()) { send(out, 400, "text/plain", "Enter a folder name"); return; }
+        File f = new File(parent, sanitize(name));
+        if (!isInside(f)) { send(out, 400, "text/plain", "Invalid name"); return; }
+        if (f.exists()) { send(out, 409, "text/plain", "\"" + f.getName() + "\" already exists"); return; }
+        if (!f.mkdir()) { send(out, 500, "text/plain", "Could not create folder"); return; }
+        log("Created folder " + f.getName());
+        send(out, 200, "application/json; charset=utf-8", okName(f.getName()));
+    }
+
+    private static String okName(String n) { return "{\"ok\":true,\"name\":" + jsonStr(n) + "}"; }
 
     private String listJson(File dir) {
         File[] folders = dir.listFiles(f -> f.isDirectory() && !f.getName().startsWith("."));
@@ -326,6 +377,7 @@ public class FileServer {
             case 204: return "No Content";
             case 400: return "Bad Request";
             case 404: return "Not Found";
+            case 409: return "Conflict";
             case 411: return "Length Required";
             case 507: return "Insufficient Storage";
             default: return "Error";
