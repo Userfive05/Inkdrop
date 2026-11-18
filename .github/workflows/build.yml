@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,7 +21,13 @@ jobs:
           gradle-version: '8.9'
       - name: Build debug APK
         run: gradle assembleDebug
-      - uses: actions/upload-artifact@v4
-        with:
-          name: InkDrop-apk
-          path: app/build/outputs/apk/debug/*.apk
+      - name: Publish APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk InkDrop.apk
+          TAG="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" InkDrop.apk \
+            --title "InkDrop build ${GITHUB_RUN_NUMBER}" \
+            --notes "Debug APK built from ${GITHUB_SHA::7}. Download InkDrop.apk and sideload it on the Boox." \
+            --latest
