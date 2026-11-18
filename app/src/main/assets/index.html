@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>InkDrop</title>
+<style>
+  :root { --fg:#111; --muted:#666; --line:#ddd; --bg:#fafafa; --accent:#111; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:var(--fg); background:var(--bg); }
+  main { max-width: 640px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; word-break: break-all; }
+  #drop { border: 2px dashed #999; border-radius: 12px; padding: 28px 16px; text-align: center; background:#fff; cursor:pointer; }
+  #drop.over { border-color: var(--accent); background:#f0f0f0; }
+  #drop b { display:block; font-size: 17px; margin-bottom: 6px; }
+  #drop span { color: var(--muted); font-size: 13px; }
+  input[type=file] { display:none; }
+  h2 { font-size: 15px; margin: 26px 0 8px; display:flex; justify-content:space-between; align-items:baseline; }
+  h2 small { font-weight: normal; color: var(--muted); font-size: 12px; }
+  .row { background:#fff; border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:8px; display:flex; align-items:center; gap:10px; }
+  .row .name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; }
+  .row .meta { color: var(--muted); font-size: 12px; white-space:nowrap; }
+  .bar { height:6px; background:#eee; border-radius:3px; overflow:hidden; margin-top:6px; }
+  .bar i { display:block; height:100%; width:0; background:var(--accent); transition: width .15s; }
+  .col { flex:1; min-width:0; }
+  .err { color:#b00020; }
+  .ok { color:#1b7f3b; }
+  a.btn, button.btn { font: inherit; font-size:13px; padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:#fff; color:var(--fg); text-decoration:none; cursor:pointer; }
+  button.del { color:#b00020; }
+  .empty { color: var(--muted); font-size: 14px; padding: 8px 2px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>InkDrop</h1>
+  <div class="sub" id="folder">Connecting…</div>
+
+  <label id="drop" for="pick">
+    <b>Tap to choose files</b>
+    <span>or drag &amp; drop · EPUB, PDF, CBZ, anything</span>
+  </label>
+  <input type="file" id="pick" multiple>
+
+  <div id="queue"></div>
+
+  <h2>On the device <small id="free"></small></h2>
+  <div id="list"><div class="empty">Loading…</div></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const fmt = b => { if (b < 1024) return b + ' B'; const u=['KB','MB','GB','TB']; let i=-1; do { b/=1024; i++; } while (b>=1024 && i<u.length-1); return b.toFixed(1)+' '+u[i]; };
+const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const queue = [];
+let busy = false;
+
+function addFiles(files) {
+  for (const f of files) {
+    const el = document.createElement('div');
+    el.className = 'row';
+    el.innerHTML = '<div class="col"><div class="name">' + esc(f.name) + '</div><div class="bar"><i></i></div></div><div class="meta">' + fmt(f.size) + '</div>';
+    $('#queue').appendChild(el);
+    queue.push({ file: f, el });
+  }
+  next();
+}
+
+function next() {
+  if (busy || !queue.length) return;
+  busy = true;
+  const { file, el } = queue.shift();
+  const bar = el.querySelector('.bar i'), meta = el.querySelector('.meta');
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/upload?name=' + encodeURIComponent(file.name));
+  xhr.upload.onprogress = e => { if (e.lengthComputable) { const p = e.loaded / e.total * 100; bar.style.width = p + '%'; meta.textContent = Math.floor(p) + '%'; } };
+  xhr.onload = () => {
+    if (xhr.status === 200) { bar.style.width = '100%'; meta.textContent = 'Done'; meta.className = 'meta ok'; setTimeout(() => el.remove(), 2500); }
+    else { meta.textContent = 'Failed'; meta.className = 'meta err'; meta.title = xhr.responseText; }
+    finish();
+  };
+  xhr.onerror = () => { meta.textContent = 'Failed'; meta.className = 'meta err'; finish(); };
+  xhr.send(file);
+  function finish() { busy = false; refresh(); next(); }
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/files');
+    const d = await r.json();
+    $('#folder').textContent = 'Saving to ' + d.folder;
+    $('#free').textContent = fmt(d.free) + ' free';
+    const list = $('#list');
+    if (!d.files.length) { list.innerHTML = '<div class="empty">No files yet.</div>'; return; }
+    list.innerHTML = d.files.map(f =>
+      '<div class="row"><div class="col"><div class="name">' + esc(f.name) + '</div><div class="meta">' + fmt(f.size) + ' · ' + new Date(f.mtime).toLocaleString() + '</div></div>' +
+      '<a class="btn" href="/dl?name=' + encodeURIComponent(f.name) + '">Get</a>' +
+      '<button class="btn del" data-name="' + esc(f.name) + '">Delete</button></div>').join('');
+  } catch (e) {
+    $('#folder').textContent = 'Lost connection to the e-reader.';
+  }
+}
+
+$('#list').addEventListener('click', async e => {
+  const b = e.target.closest('button.del');
+  if (!b) return;
+  const name = b.dataset.name;
+  if (!confirm('Delete "' + name + '" from the e-reader?')) return;
+  await fetch('/api/delete?name=' + encodeURIComponent(name), { method: 'POST' });
+  refresh();
+});
+
+$('#pick').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+const drop = $('#drop');
+['dragenter','dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+
+refresh();
+</script>
+</body>
+</html>
