@@ -28,10 +28,10 @@ import java.util.concurrent.Executors;
  *
  * Routes:
  *   GET  /                      upload page
- *   GET  /api/files             JSON list of files + free space
- *   POST /api/upload?name=X     raw request body is the file
- *   GET  /dl?name=X             download a file
- *   POST /api/delete?name=X     delete a file
+ *   GET  /api/list?dir=D               JSON list of folders + files in D (relative to root)
+ *   POST /api/upload?dir=D&name=X      raw request body is the file
+ *   GET  /dl?dir=D&name=X              download a file
+ *   POST /api/delete?dir=D&name=X      delete a file
  */
 public class FileServer {
 
@@ -126,14 +126,16 @@ public class FileServer {
 
             if (method.equals("GET") && (path.equals("/") || path.equals("/index.html"))) {
                 send(out, 200, "text/html; charset=utf-8", html);
-            } else if (method.equals("GET") && path.equals("/api/files")) {
-                send(out, 200, "application/json; charset=utf-8", listJson());
+            } else if (method.equals("GET") && (path.equals("/api/list") || path.equals("/api/files"))) {
+                File dir = resolveDir(query.get("dir"));
+                if (dir == null || !dir.isDirectory()) send(out, 404, "text/plain", "Folder not found");
+                else send(out, 200, "application/json; charset=utf-8", listJson(dir));
             } else if (method.equals("POST") && path.equals("/api/upload")) {
-                upload(in, out, headers, query.get("name"));
+                upload(in, out, headers, query.get("dir"), query.get("name"));
             } else if (method.equals("GET") && path.equals("/dl")) {
-                download(out, query.get("name"));
+                download(out, query.get("dir"), query.get("name"));
             } else if (method.equals("POST") && path.equals("/api/delete")) {
-                delete(out, query.get("name"));
+                delete(out, query.get("dir"), query.get("name"));
             } else if (method.equals("GET") && path.equals("/favicon.ico")) {
                 send(out, 204, "text/plain", "");
             } else {
@@ -144,13 +146,14 @@ public class FileServer {
         }
     }
 
-    private void upload(InputStream in, OutputStream out, Map<String, String> headers, String rawName) throws IOException {
+    private void upload(InputStream in, OutputStream out, Map<String, String> headers, String rawDir, String rawName) throws IOException {
         String lenHeader = headers.get("content-length");
         if (lenHeader == null) { send(out, 411, "text/plain", "Content-Length required"); return; }
         long length;
         try { length = Long.parseLong(lenHeader); } catch (NumberFormatException e) { send(out, 400, "text/plain", "Bad length"); return; }
 
-        File dir = root;
+        File dir = resolveDir(rawDir);
+        if (dir == null) { send(out, 400, "text/plain", "Bad folder"); return; }
         if (!dir.exists() && !dir.mkdirs()) { send(out, 500, "text/plain", "Cannot create folder " + dir); return; }
         if (dir.getUsableSpace() < length) { send(out, 507, "text/plain", "Not enough free space"); return; }
 
@@ -179,8 +182,8 @@ public class FileServer {
         send(out, 200, "application/json; charset=utf-8", "{\"ok\":true,\"name\":" + jsonStr(dest.getName()) + "}");
     }
 
-    private void download(OutputStream out, String name) throws IOException {
-        File f = resolve(name);
+    private void download(OutputStream out, String dir, String name) throws IOException {
+        File f = resolve(dir, name);
         if (f == null || !f.isFile()) { send(out, 404, "text/plain", "Not found"); return; }
         String encoded = URLEncoder.encode(f.getName(), "UTF-8").replace("+", "%20");
         String head = "HTTP/1.1 200 OK\r\n"
@@ -197,8 +200,8 @@ public class FileServer {
         out.flush();
     }
 
-    private void delete(OutputStream out, String name) throws IOException {
-        File f = resolve(name);
+    private void delete(OutputStream out, String dir, String name) throws IOException {
+        File f = resolve(dir, name);
         if (f == null || !f.isFile()) { send(out, 404, "text/plain", "Not found"); return; }
         if (f.delete()) {
             log("Deleted " + f.getName());
@@ -208,15 +211,25 @@ public class FileServer {
         }
     }
 
-    private String listJson() {
-        File dir = root;
+    private String listJson(File dir) {
+        File[] folders = dir.listFiles(f -> f.isDirectory() && !f.getName().startsWith("."));
         File[] files = dir.listFiles(f -> f.isFile() && !f.getName().startsWith("."));
+        if (folders == null) folders = new File[0];
         if (files == null) files = new File[0];
-        Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        Arrays.sort(folders, (a, b) -> a.getName().compareToIgnoreCase(b.getName()));
+        Arrays.sort(files, (a, b) -> a.getName().compareToIgnoreCase(b.getName()));
         StringBuilder sb = new StringBuilder();
-        sb.append("{\"folder\":").append(jsonStr(dir.getAbsolutePath()))
-          .append(",\"free\":").append(dir.exists() ? dir.getUsableSpace() : 0)
-          .append(",\"files\":[");
+        sb.append("{\"root\":").append(jsonStr(root.getName()))
+          .append(",\"folder\":").append(jsonStr(dir.getAbsolutePath()))
+          .append(",\"free\":").append(dir.getUsableSpace())
+          .append(",\"folders\":[");
+        for (int i = 0; i < folders.length; i++) {
+            if (i > 0) sb.append(',');
+            String[] kids = folders[i].list();
+            sb.append("{\"name\":").append(jsonStr(folders[i].getName()))
+              .append(",\"count\":").append(kids == null ? 0 : kids.length).append('}');
+        }
+        sb.append("],\"files\":[");
         for (int i = 0; i < files.length; i++) {
             if (i > 0) sb.append(',');
             sb.append("{\"name\":").append(jsonStr(files[i].getName()))
@@ -228,12 +241,33 @@ public class FileServer {
 
     // ---------------------------------------------------------------- helpers
 
-    /** Returns a file directly inside root, or null if the name tries to escape it. */
-    private File resolve(String name) throws IOException {
+    /** Resolves a folder path relative to root; null if it tries to escape root. */
+    private File resolveDir(String dir) throws IOException {
+        File f = root;
+        if (dir != null) {
+            for (String seg : dir.split("[/\\\\]")) {
+                if (seg.isEmpty()) continue;
+                if (seg.equals(".") || seg.equals("..")) return null;
+                f = new File(f, seg);
+            }
+        }
+        return isInside(f) ? f : null;
+    }
+
+    /** Returns a file directly inside the given folder, or null if it tries to escape root. */
+    private File resolve(String dir, String name) throws IOException {
         if (name == null) return null;
-        File f = new File(root, sanitize(name));
-        if (!f.getCanonicalFile().getParentFile().equals(root.getCanonicalFile())) return null;
+        File d = resolveDir(dir);
+        if (d == null) return null;
+        File f = new File(d, sanitize(name));
+        if (!isInside(f) || !f.getCanonicalFile().getParentFile().equals(d.getCanonicalFile())) return null;
         return f;
+    }
+
+    private boolean isInside(File f) throws IOException {
+        String r = root.getCanonicalPath();
+        String p = f.getCanonicalPath();
+        return p.equals(r) || p.startsWith(r + File.separator);
     }
 
     static String sanitize(String name) {
