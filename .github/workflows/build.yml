@@ -19,15 +19,30 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Build debug APK
-        run: gradle assembleDebug
+
+      - name: Decode signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::Add the KEYSTORE_B64 and KEYSTORE_PASSWORD repository secrets (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/inkdrop.p12"
+
+      - name: Build signed APK
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/inkdrop.p12
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: gradle assembleRelease
+
       - name: Publish APK as a release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk InkDrop.apk
+          cp app/build/outputs/apk/release/app-release.apk InkDrop.apk
           TAG="build-${GITHUB_RUN_NUMBER}"
           gh release create "$TAG" InkDrop.apk \
-            --title "InkDrop build ${GITHUB_RUN_NUMBER}" \
-            --notes "Debug APK built from ${GITHUB_SHA::7}. Download InkDrop.apk and sideload it on the Boox." \
+            --title "InkDrop 1.${GITHUB_RUN_NUMBER}" \
+            --notes "Built from ${GITHUB_SHA::7}. Install InkDrop.apk on the Boox, or tap Update in the app." \
             --latest

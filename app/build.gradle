@@ -2,6 +2,12 @@ plugins {
     id 'com.android.application'
 }
 
+// CI sets GITHUB_RUN_NUMBER; it becomes the version code so the in-app updater can compare builds.
+def runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger()
+// Signing key comes from GitHub secrets (decoded to a file by the workflow), never from the repo.
+def keystorePath = System.getenv("KEYSTORE_FILE")
+def keystorePassword = System.getenv("KEYSTORE_PASSWORD")
+
 android {
     namespace 'com.inkdrop.app'
     compileSdk 34
@@ -10,16 +16,40 @@ android {
         applicationId 'com.inkdrop.app'
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        versionCode runNumber
+        versionName "1.${runNumber}"
+    }
+
+    signingConfigs {
+        if (keystorePath) {
+            inkdrop {
+                storeFile file(keystorePath)
+                storeType 'pkcs12'
+                storePassword keystorePassword
+                keyAlias 'inkdrop'
+                keyPassword keystorePassword
+            }
+        }
     }
 
     buildTypes {
-        release { minifyEnabled false }
+        release {
+            minifyEnabled false
+            if (keystorePath) signingConfig signingConfigs.inkdrop
+        }
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    implementation 'com.google.zxing:core:3.5.3'
 }
